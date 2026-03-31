@@ -1,0 +1,10 @@
+# Generated output decks
+*_deck.pptx
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Old/unused files
+*.pdf
