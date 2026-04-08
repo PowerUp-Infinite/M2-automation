@@ -61,10 +61,10 @@ CHART_COLORS = {
     '2) Balanced':     '#4E9EED',
     '3) Conservative': '#6DB0F2',
     'Hybrid':          '#FFE2BF',
-    'Gold & Silver':   '#E8D5A0',
-    'Debt Like':       '#B5CFE8',
-    'Solution':        '#C9B8DC',
-    'Global':          '#A8C4D4',
+    'Debt Like':       '#EBF2F2',  # light mint/seafoam — from PowerUp_Base_Deck legend
+    'Gold & Silver':   '#F7CB88',  # golden amber      — from PowerUp_Base_Deck legend
+    'Global':          '#FFC7B4',  # salmon/peach-pink  — from PowerUp_Base_Deck legend
+    'Solution':        '#CABAF3',  # lavender           — from PowerUp_Base_Deck legend
 }
 CHART_LABELS = {
     '1) Aggressive':   'Aggressive',
@@ -149,6 +149,19 @@ def fmt_inr_rupee(value, prefix='₹'):
 # Keep backward compat alias
 fmt_inr = fmt_inr_rupee
 
+def _fmt_inr_2dp(value, prefix=''):
+    """Like fmt_inr_rupee but always 2 decimal places — used in appendix tables."""
+    if pd.isna(value) or value == 0:
+        return f'{prefix}0'
+    av = abs(value); s = '' if value >= 0 else '-'
+    if av >= 1e7:
+        return f'{s}{prefix}{av/1e7:.2f}Cr'
+    if av >= 1e5:
+        return f'{s}{prefix}{av/1e5:.2f}L'
+    if av >= 1e3:
+        return f'{s}{prefix}{av/1e3:.2f}K'
+    return f'{s}{prefix}{av:.0f}'
+
 def fmt_inr_display(value):
     """INR 50L / INR 1 Cr — for slide display"""
     if pd.isna(value) or value == 0:
@@ -198,6 +211,30 @@ def _safe_pct(val):
     except Exception:
         return s if s else '-'
 
+_EXCEL_EPOCH = pd.Timestamp('1899-12-30')
+
+def _parse_dates(series):
+    """Parse a date series that may contain date strings OR Excel serial numbers."""
+    try:
+        # Try normal string parsing first
+        return pd.to_datetime(series, dayfirst=True)
+    except Exception:
+        pass
+    # Fall back: treat numeric values as Excel serial-day offsets from 1899-12-30
+    def _conv(v):
+        try:
+            n = float(v)
+            if 20000 < n < 100000:   # plausible Excel serial (1954–2173)
+                return _EXCEL_EPOCH + pd.Timedelta(days=int(n))
+        except (ValueError, TypeError):
+            pass
+        try:
+            return pd.to_datetime(v, dayfirst=True)
+        except Exception:
+            return pd.NaT
+    return series.apply(_conv)
+
+
 def _safe_str(val):
     """Return string value; NaN/None -> '-'. Whole-number floats (e.g. 2028.0) -> '2028'."""
     if val is None: return '-'
@@ -209,7 +246,7 @@ def _safe_str(val):
     return s if s else '-'
 
 def fmt_scheme_val(cv, pf_pct):
-    v = fmt_inr_rupee(cv, prefix='')
+    v = _fmt_inr_2dp(cv)
     return f'{v} ({pf_pct * 100:.1f}%)'
 
 def fmt_xirr_pair(x, bx):
@@ -218,7 +255,7 @@ def fmt_xirr_pair(x, bx):
 
 def fmt_missed(mg):
     if pd.isna(mg) or mg == 0: return '-'
-    return fmt_inr_rupee(mg, prefix='')
+    return _fmt_inr_2dp(mg)
 
 def _match(text, mapping):
     if pd.isna(text): return None
@@ -233,10 +270,11 @@ def _match(text, mapping):
 
 def calc_risk_profile(q):
     """
-    New 3-step risk logic:
+    4-step risk logic:
     1. Base from Portfolio Preference return % (15% VeryAgg, 12% Agg, 9% Bal, 6% Con)
     2. Horizon adjustment: short/medium/medium-to-long -> -1; long-term -> 0
     3. Fall Reaction: invest more -> +1; stay invested -> 0; exit* -> -1
+    4. Liability management: 'Yes - comfortably' -> 0; 'Just about' -> -1; other struggling -> -1
     """
     # Step 1: Base index from Portfolio Preference
     pref = str(q.get('Portfolio Preference', '')).lower()
@@ -271,8 +309,16 @@ def calc_risk_profile(q):
         f_adj = -1
     idx = max(0, min(4, idx + f_adj))
 
+    # Step 4: Liability management adjustment
+    liab = str(q.get('Liability Followup Answer', '')).lower()
+    if not liab or 'yes' in liab or 'comfort' in liab:
+        l_adj = 0   # comfortably / no liabilities → no change
+    else:
+        l_adj = -1  # 'just about', 'barely', 'no', 'struggling' → downgrade one tier
+    idx = max(0, min(4, idx + l_adj))
+
     profile = RISK_SCALE[idx]
-    print(f"  Risk: base={base} h_adj={h_adj} f_adj={f_adj} -> {profile}")
+    print(f"  Risk: base={base} h_adj={h_adj} f_adj={f_adj} l_adj={l_adj} -> {profile}")
     return profile
 
 def get_horizon(text):
@@ -389,6 +435,7 @@ def do_slide1(prs, full_name):
             txt = ''.join(r.text for r in para.runs)
             if 'with' in txt.lower() and len(txt) < 80:
                 para.runs[0].text = f'with {full_name}'
+                para.runs[0].font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
                 for r in para.runs[1:]:
                     r.text = ''
                 print(f"  Slide 1: title -> 'with {full_name}'")
@@ -427,12 +474,19 @@ def do_slide3(prs, q_row, risk_profile):
     horizon = get_horizon(q_row.get('Investment Horizon', ''))
     age     = q_row.get('Age', '')
 
-    lump_val = q_row.get('Lumpsum Amount (with Infinite)', 0)
-    sip_val  = q_row.get('Monthly SIP Amount (with Infinite)', 0)
-    lump_str = fmt_inr_display(lump_val) if not pd.isna(lump_val) and lump_val else 'INR 0'
-    sip_str  = fmt_inr_display(sip_val)  if not pd.isna(sip_val)  and sip_val  else 'INR 0'
-    has_stepup = False  # remove * — no step-up column in current data
+    lump_val  = q_row.get('Lumpsum Amount (with Infinite)', 0)
+    sip_val   = q_row.get('Monthly SIP Amount (with Infinite)', 0)
+    stepup_raw = q_row.get('Ret: YoY Investment Increase %', 0)
+    lump_str  = fmt_inr_display(lump_val)  if not pd.isna(lump_val)   and lump_val   else 'INR 0'
+    sip_str   = fmt_inr_display(sip_val)   if not pd.isna(sip_val)    and sip_val    else 'INR 0'
+    try:
+        step_up = float(stepup_raw) if not pd.isna(stepup_raw) else 0.0
+    except (TypeError, ValueError):
+        # Could be "10%" string
+        step_up = float(str(stepup_raw).rstrip('%')) if str(stepup_raw).rstrip('%').replace('.','').isdigit() else 0.0
+    has_stepup = step_up > 0
 
+    shapes_to_remove = []
     for shape in slide.shapes:
         if not shape.has_text_frame:
             continue
@@ -455,9 +509,24 @@ def do_slide3(prs, q_row, risk_profile):
             replace_text(shape, f'{risk_profile} Investor')
 
         elif shape.name == 'Google Shape;132;p18':
-            if age:
-                replace_text(shape, f'Current Age: {age}')
-                print(f"  Slide 3: age -> '{age}'")
+            # Two shapes share this name: age and SIP step-up
+            cur = shape.text_frame.text.strip()
+            if 'SIP' in cur or 'Step' in cur or 'step' in cur:
+                if has_stepup:
+                    replace_text(shape, f'SIP Step-Up every year: {step_up:.0f}%')
+                    print(f"  Slide 3: SIP step-up -> {step_up:.0f}%")
+                else:
+                    shapes_to_remove.append(shape)
+                    print("  Slide 3: SIP step-up = 0, removing text box")
+            else:
+                if age:
+                    replace_text(shape, f'Current Age: {age}')
+                    print(f"  Slide 3: age -> '{age}'")
+
+    # Remove shapes after iteration to avoid modifying the collection mid-loop
+    sp_tree = slide.shapes._spTree
+    for shape in shapes_to_remove:
+        sp_tree.remove(shape._element)
 
 
 def _set_goals_text(shape, goals):
@@ -555,6 +624,14 @@ def _set_investment_text(shape, lump_str, sip_str, has_stepup):
 # SLIDE 4 — Portfolio Snapshot  (metrics + pie chart)
 # ──────────────────────────────────────────────────────────────
 
+def _portfolio_risk(sm):
+    """Derive portfolio risk from Small + Mid allocation percentage."""
+    if sm < 15:  return 'Very Conservative'
+    if sm < 20:  return 'Conservative'
+    if sm < 40:  return 'Balanced'
+    if sm < 45:  return 'Aggressive'
+    return 'Very Aggressive'
+
 def do_slide4(prs, pf, rg_agg, risk_profile):
     slide = prs.slides[3]
     cv   = pf['PF_CURRENT_VALUE']
@@ -564,6 +641,8 @@ def do_slide4(prs, pf, rg_agg, risk_profile):
     pg   = pf['PF_GAINS']
     bg   = pf.get('BM_CURRENT_VALUE', iv) - iv
     sm   = (pf.get('SMALL', 0) + pf.get('MID', 0)) * pf.get('EQUITY', 0) * 100
+    pf_risk = _portfolio_risk(sm)
+    matches = pf_risk == risk_profile
 
     name_val = {
         'Google Shape;165;p19': fmt_inr_rupee(cv),
@@ -588,7 +667,24 @@ def do_slide4(prs, pf, rg_agg, risk_profile):
             replace_text(shape, f'Small + Mid Allocation: {sm:.0f}%')
             print(f"  Slide 4: S+M -> {sm:.0f}%")
         elif shape.name == 'Google Shape;157;p19':
-            replace_text(shape, risk_profile)
+            replace_text(shape, pf_risk)
+            print(f"  Slide 4: portfolio risk (S+M={sm:.0f}%) -> '{pf_risk}'")
+        elif shape.name == 'Google Shape;195;p19':
+            # Shape has green+red runs baked in — pick the right one
+            tf = shape.text_frame
+            match_text   = "Matches your risk profile"
+            nomatch_text = "Doesn't match your risk profile"
+            match_color   = RGBColor(0x2A, 0x9C, 0x4A)   # green
+            nomatch_color = RGBColor(0xCC, 0x00, 0x00)    # red
+            new_text  = match_text if matches else nomatch_text
+            new_color = match_color if matches else nomatch_color
+            for para in tf.paragraphs:
+                for run in para.runs:
+                    run.text       = new_text
+                    run.font.color.rgb = new_color
+                    new_text = ''   # only first run carries text; rest cleared
+            print(f"  Slide 4: match/no-match -> '{(match_text if matches else nomatch_text)}' "
+                  f"(pf_risk='{pf_risk}', q_risk='{risk_profile}')")
 
     _make_pie(slide, rg_agg)
 
@@ -848,17 +944,24 @@ def do_appendix(prs, pf_id, data):
         print("  Appendix: no schemes — deleting template slides")
         for i in [25, 24, 23, 22]:
             delete_slide(prs, i)
-        return
+        return 0
 
     c_map = dict(zip(cat['Proposed Sub-Category'], cat['Powerup Broad Category']))
     s_map = dict(zip(cat['Proposed Sub-Category'], cat['Final Serialing']))
     n_map = dict(zip(cat['Proposed Sub-Category'], cat['Names']))
+
+    # Arbitrage funds belong under Debt, not Hybrid
+    c_map['ARBITRAGE_FUND']         = 'Debt'
+    c_map['FUND_OF_FUNDS_ARBITRAGE'] = 'Debt'
 
     sch['_cat']  = sch['UPDATED_SUBCATEGORY'].map(c_map).fillna(
                        sch['UPDATED_SUBCATEGORY'].str.replace('_', ' ').str.title())
     sch['_sort'] = sch['UPDATED_SUBCATEGORY'].map(s_map).fillna(999)
     sch['_disp'] = sch['UPDATED_SUBCATEGORY'].map(n_map).fillna(
                        sch['UPDATED_SUBCATEGORY'].str.replace('_', ' ').str.title())
+
+    # Drop rows with no subcategory (can't be grouped or displayed)
+    sch = sch.dropna(subset=['UPDATED_SUBCATEGORY'])
 
     # Ordered unique subcategories by sort number
     seen = {}
@@ -871,6 +974,8 @@ def do_appendix(prs, pf_id, data):
     for subcat in seen:
         grp = sch[sch['UPDATED_SUBCATEGORY'] == subcat].sort_values(
             'CURRENT_VALUE', ascending=False)
+        if grp.empty:
+            continue
         groups.append(dict(
             cat  = grp['_cat'].iloc[0],
             disp = grp['_disp'].iloc[0],
@@ -889,10 +994,11 @@ def do_appendix(prs, pf_id, data):
         rows = list(g['rows'])
 
         # Try to pack: if this group has exactly 1 row AND next group has 1-2 rows
+        # Only pack within the same broad category (never mix Equity with Hybrid, etc.)
         if len(rows) == 1 and gi + 1 < len(groups):
             g_next = groups[gi + 1]
             n_next = min(2, len(g_next['rows']))
-            if 1 <= n_next <= 2:
+            if g['cat'] == g_next['cat'] and 1 <= n_next <= 2:
                 specs.append(dict(
                     tpl='packed',
                     sec2_n=n_next,
@@ -952,6 +1058,39 @@ def do_appendix(prs, pf_id, data):
             _fill_scheme_slide(ns, sp)
 
     print(f"  Appendix: {n} slides created & filled")
+    return n
+
+
+def do_hyperlinks(prs, n_appendix):
+    """Wire internal hyperlinks: slide4 'see here' -> first appendix; appendix 'Go back' -> slide4."""
+    if n_appendix == 0:
+        return
+
+    REL_SLIDE = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide'
+    NS_R_ID   = f'{{{NS_R}}}id'
+
+    slide4     = prs.slides[3]
+    first_app  = prs.slides[22]   # first appendix slide is always at index 22
+
+    # ── Slide 4 "see here" → first appendix slide ──────────────────
+    for shape in slide4.shapes:
+        if ';190;' not in shape.name:
+            continue
+        for hlink in shape._element.iter(f'{{{NS_A}}}hlinkClick'):
+            rId = slide4.part.relate_to(first_app.part, REL_SLIDE)
+            hlink.set(NS_R_ID, rId)
+            hlink.set('action', 'ppaction://hlinksldjump')
+            print(f"  Hyperlink: slide4 -> appendix[0]  rId={rId}")
+
+    # ── Each appendix slide "Go back" → slide 4 ─────────────────────
+    for i in range(n_appendix):
+        app_slide = prs.slides[22 + i]
+        rId = app_slide.part.relate_to(slide4.part, REL_SLIDE)
+        for shape in app_slide.shapes:
+            for hlink in shape._element.iter(f'{{{NS_A}}}hlinkClick'):
+                hlink.set(NS_R_ID, rId)
+                hlink.set('action', 'ppaction://hlinksldjump')
+        print(f"  Hyperlink: appendix[{i}] -> slide4  rId={rId}")
 
 
 def _clone_shape_at(slide, template_shape, new_y, new_text):
@@ -1031,6 +1170,14 @@ def _clone_section_onto_slide(source_slide, target_slide, y_offset):
             pass
     next_id = max(existing_ids) + 1 if existing_ids else 9000
 
+    # Build an image rId map: source rId -> target rId (only for images on source)
+    img_rId_map = {}
+    for src_rId, rel in source_slide.part.rels.items():
+        if 'image' in rel.reltype:
+            img_part = rel.target_part
+            new_rId = target_slide.part.relate_to(img_part, rel.reltype)
+            img_rId_map[src_rId] = new_rId
+
     for shape in source_slide.shapes:
         try:
             top = shape.top
@@ -1038,13 +1185,18 @@ def _clone_section_onto_slide(source_slide, target_slide, y_offset):
             continue
         if not (_SECTION_MIN_Y <= top < _SECTION_MAX_Y):
             continue
-        # Skip picture shapes — they are placeholder rating images whose
-        # image relationships won't survive the copy.  _fill_scheme_slide
-        # removes any stale images and adds correct ones.
+        # Skip standalone picture shapes — rating images are re-added by _fill_scheme_slide.
+        # Groups may contain a separator-line image that must be preserved.
         if shape.shape_type == 13:
             continue
 
         clone_el = deepcopy(shape._element)
+
+        # Remap any image rIds inside the clone (e.g. separator-line image inside GROUP)
+        for blip in clone_el.iter(f'{{{NS_A}}}blip'):
+            old_rId = blip.get(f'{{{NS_R}}}embed')
+            if old_rId and old_rId in img_rId_map:
+                blip.set(f'{{{NS_R}}}embed', img_rId_map[old_rId])
 
         # Assign fresh unique IDs to every element that carries an 'id' attribute
         for el in clone_el.iter():
@@ -1293,7 +1445,7 @@ def do_slide13(prs, pf_id, risk_profile, data):
     # ── Get chart lines ──────────────────────────────────────────────────────
     lines_df = data['lines']
     cust_lines = lines_df[lines_df['PF_ID'] == pf_id].copy()
-    cust_lines['DATE'] = pd.to_datetime(cust_lines['DATE'], dayfirst=True)
+    cust_lines['DATE'] = _parse_dates(cust_lines['DATE'])
 
     pf_line  = cust_lines[cust_lines['TYPE'] == 'pf'].sort_values('DATE')
     inf_line = cust_lines[cust_lines['TYPE'] == inf_type].sort_values('DATE')
@@ -1305,7 +1457,7 @@ def do_slide13(prs, pf_id, risk_profile, data):
     # Clip invested value to the same date range as pf line
     date_min, date_max = pf_line['DATE'].min(), pf_line['DATE'].max()
     inv_df = data['invested'][data['invested']['PF_ID'] == pf_id].copy()
-    inv_df['DATE'] = pd.to_datetime(inv_df['DATE'], dayfirst=True)
+    inv_df['DATE'] = _parse_dates(inv_df['DATE'])
     inv_df = inv_df[(inv_df['DATE'] >= date_min) & (inv_df['DATE'] <= date_max)].sort_values('DATE')
 
     # Merge all lines on pf_line dates (forward-fill invested amount)
@@ -1507,24 +1659,71 @@ def _get_answer(question_text, q_row, context=''):
                             and pd.isna(q_row.get(f'Edu: Child {i} UG Year', float('nan')))))
         return str(max(count, 1))
     if 'undergraduate' in q and 'start year' in q:
-        return _safe_str(q_row.get('Edu: Child 1 UG Year'))
+        years = [_safe_str(q_row.get(f'Edu: Child {i} UG Year'))
+                 for i in range(1, 5)
+                 if not (isinstance(q_row.get(f'Edu: Child {i} UG Year'), float)
+                         and pd.isna(q_row.get(f'Edu: Child {i} UG Year')))]
+        return ' & '.join(years) if years else '-'
     if 'cost' in q and 'undergraduate' in q:
-        return _safe_inr(q_row.get('Edu: Child 1 UG Cost', 0))
+        costs = []
+        for i in range(1, 5):
+            c = q_row.get(f'Edu: Child {i} UG Cost')
+            if c is not None and not (isinstance(c, float) and pd.isna(c)):
+                try:
+                    if float(c) > 0:
+                        costs.append(_safe_inr(float(c)))
+                except (ValueError, TypeError):
+                    pass
+        return ' & '.join(costs) if costs else '-'
     if 'postgraduate' in q and 'start year' in q:
-        return _safe_str(q_row.get('Edu: Child 1 PG Year'))
+        years = [_safe_str(q_row.get(f'Edu: Child {i} PG Year'))
+                 for i in range(1, 5)
+                 if not (isinstance(q_row.get(f'Edu: Child {i} PG Year'), float)
+                         and pd.isna(q_row.get(f'Edu: Child {i} PG Year')))]
+        return ' & '.join(years) if years else '-'
     if 'cost' in q and 'postgraduate' in q:
-        return _safe_inr(q_row.get('Edu: Child 1 PG Cost', 0))
+        costs = []
+        for i in range(1, 5):
+            c = q_row.get(f'Edu: Child {i} PG Cost')
+            if c is not None and not (isinstance(c, float) and pd.isna(c)):
+                try:
+                    if float(c) > 0:
+                        costs.append(_safe_inr(float(c)))
+                except (ValueError, TypeError):
+                    pass
+        return ' & '.join(costs) if costs else '-'
 
     # Children's Marriage
     if 'number of children' in q and 'marriage' in q:
-        name = q_row.get('Marriage: Child 1 Name', '')
-        if not (isinstance(name, float) and pd.isna(name)) and str(name).strip():
-            return f'1 - {name}'
-        return '1'
+        names = []
+        for i in range(1, 5):
+            n = q_row.get(f'Marriage: Child {i} Name', '')
+            if not (isinstance(n, float) and pd.isna(n)) and str(n).strip():
+                names.append(str(n).strip())
+        count = max(len(names), 1)
+        if names:
+            return f'{count} - {", ".join(names)}'
+        return str(count)
     if 'timeframe' in q and 'marriage' in q:
-        return _safe_str(q_row.get('Marriage: Child 1 Timeframe'))
+        times = []
+        for i in range(1, 5):
+            t = q_row.get(f'Marriage: Child {i} Timeframe')
+            if t is not None and not (isinstance(t, float) and pd.isna(t)) and str(t).strip():
+                times.append(_safe_str(t))
+        return ' & '.join(times) if times else '-'
     if 'budget for marriage' in q or ('budget' in q and 'marriage' in q):
-        return _safe_inr(q_row.get('Marriage: Child 1 Budget', 0))
+        budgets = []
+        for i in range(1, 5):
+            b = q_row.get(f'Marriage: Child {i} Budget')
+            if b is not None and not (isinstance(b, float) and pd.isna(b)):
+                try:
+                    fv = float(b)
+                    if fv > 0:
+                        budgets.append(_safe_inr(fv))
+                except (ValueError, TypeError):
+                    if str(b).strip():
+                        budgets.append(str(b).strip())
+        return ' & '.join(budgets) if budgets else '-'
 
     # Vehicle Purchase  (explicit 'vehicle' in question OR context='vehicle')
     if 'vehicle' in q or context == 'vehicle':
@@ -1546,12 +1745,55 @@ def _get_answer(question_text, q_row, context=''):
     return None  # no match — leave template text unchanged
 
 
+# ── Complete answer → subcaption lookup (sourced from questionnaire form screenshots) ──
+ANSWER_SUBCAPTIONS = {
+    # Employment status
+    'actively working':                     'Engaged in a full-time or part-time job, business, or self-employed with regular active income.',
+    'soon to be retiring (within 5 yrs)':   'Planning to retire within the next few years',
+    'soon to be retiring':                  'Planning to retire within the next few years',
+    'retired early':                        'Not currently working by choice, but financially independent and living off savings or investments.',
+    'retired':                              'No longer in active employment; primarily dependent on pension, savings, or investment income for expenses.',
+    # Income source
+    'active income only':                   'Regular earnings from salary, freelancing, or business.',
+    'active + passive income':              'A mix of regular job/business income and recurring passive streams.',
+    'active + passive':                     'A mix of regular job/business income and recurring passive streams.',
+    'passive income only':                  'Recurring income from house rental, dividends, interest etc.',
+    'pension income only':                  'Monthly pension received after retirement.',
+    'passive + pension':                    'Combination of investment-based income (rent, dividends, interest) and pension inflows.',
+    'no regular source':                    'No income inflow.',
+    # Liability type
+    'none':                                 'No loans or dependents',
+    'financial liabilities only':           'Loans/EMIs but no dependents.',
+    'dependent liabilities only':           'People depend on your income, no loans.',
+    'both financial & dependent':           'Loans/EMIs and dependents rely on your income.',
+    'both financial and dependent':         'Loans/EMIs and dependents rely on your income.',
+    # Meet liabilities
+    'yes - comfortably':                    'I have enough surplus, no stress.',
+    'just about':                           "I manage, but it's tight some months.",
+    'no - struggling':                      'I often find it difficult to meet liabilities.',
+    # Investment horizon
+    'short-term goals':                     'Less than 3 years',
+    'medium-term goals':                    '3–5 years',
+    'medium to long-term goals':            '5–8 years',
+    'long-term wealth creation':            'More than 8 years',
+    # Fall reaction
+    'exit all investments immediately':     'To prevent further loss',
+    'exit partially':                       'Shift to safer options',
+    'stay invested':                        "I'm comfortable with market fluctuations",
+    'invest more':                          'I will average my cost',
+}
+
+
 def _set_answer(shape, text):
-    """Overwrite the answer text, keeping first-run formatting. Font: IBM Plex Sans."""
+    """Overwrite the answer text (para 0) and set the correct subcaption in para 1
+    using the hardcoded ANSWER_SUBCAPTIONS lookup.  If no subcaption exists for this
+    answer, the italic para 1 is cleared so the wrong default never shows."""
     if not shape.has_text_frame:
         return
-    tf = shape.text_frame
-    p0 = tf.paragraphs[0]
+    tf  = shape.text_frame
+    p0  = tf.paragraphs[0]
+
+    # Write the answer into para 0
     if p0.runs:
         p0.runs[0].text      = str(text)
         p0.runs[0].font.name = 'IBM Plex Sans'
@@ -1559,10 +1801,24 @@ def _set_answer(shape, text):
             r.text = ''
     else:
         p0.text = str(text)
-    # Clear extra description paragraphs
+
+    if len(tf.paragraphs) <= 1:
+        return  # no subcaption row in this shape — nothing more to do
+
+    # Look up the correct subcaption for this answer
+    subcap = ANSWER_SUBCAPTIONS.get(str(text).strip().lower(), '')
+
+    # Write (or clear) every run in para 1+
     for para in tf.paragraphs[1:]:
+        first = True
         for r in para.runs:
-            r.text = ''
+            if first:
+                r.text = subcap
+                first  = False
+            else:
+                r.text = ''
+        # If para had no runs but we have a subcaption, nothing we can do without
+        # rebuilding the run — the existing italic endParaRPr will keep styling.
 
 
 def _parse_portfolio_pref(text):
@@ -2171,7 +2427,10 @@ def generate_deck(pf_id, customer_name):
     do_slide13(prs, pf_id, risk_profile, data)
 
     print("[8/9] Appendix - Scheme Slides")
-    do_appendix(prs, pf_id, data)
+    n_appendix = do_appendix(prs, pf_id, data) or 0
+
+    print("[8b/9] Hyperlinks")
+    do_hyperlinks(prs, n_appendix)
 
     print("[9/9] Risk Reward Slides (15-18)")
     rr_goals = parse_goals(q_row.get('Goals', '')) if not q_row.empty else []
