@@ -714,7 +714,8 @@ def _make_pie(slide, rg):
         print("  Slide 4: empty riskgroup — skipping chart"); return
 
     eq_order    = ['Aggressive', 'Balanced', 'Conservative']
-    other_order = ['Hybrid', 'Gold & Silver', 'Debt', 'Solution', 'Global']
+    # Legend order from reference deck: Equity → Hybrid → Debt Like → Gold & Silver → Global → Solution
+    other_order = ['Hybrid', 'Debt', 'Gold & Silver', 'Global', 'Solution']
 
     def sk(x):
         if x[0] in eq_order:    return (0, eq_order.index(x[0]))
@@ -745,7 +746,7 @@ def _make_pie(slide, rg):
 
     ax.set_aspect('equal')
     ax.pie(
-        sizes, colors=colors, radius=1.0, startangle=90,
+        sizes, colors=colors, radius=1.0, startangle=90, counterclock=False,
         wedgeprops=dict(width=0.35, edgecolor='white', linewidth=2.5),
     )
     ax.axis('off')
