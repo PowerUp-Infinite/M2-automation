@@ -81,10 +81,11 @@ CHART_LABELS = {
 RISK_SCALE = ['Very Conservative', 'Conservative', 'Balanced', 'Aggressive', 'Very Aggressive']
 
 HORIZON_DISPLAY = {
-    'short':'Less than 3 Years','less than 3':'Less than 3 Years',
-    '3-5':'3-5 Years','medium-term':'3-5 Years',
-    '5-7':'5-7 Years','medium to long':'5-7 Years',
-    'more than 7':'8+ Years','more than 8':'8+ Years',
+    # Most-specific keys first — dict iteration order is insertion order.
+    'more than 8':'8+ Years','more than 7':'8+ Years',
+    '5-8':'5-8 Years','medium to long':'5-8 Years',
+    '3-5':'3-5 Years','3–5':'3-5 Years','medium-term':'3-5 Years',
+    'less than 3':'Less than 3 Years','short':'Less than 3 Years',
     'long-term':'8+ Years','long':'8+ Years',
 }
 
@@ -484,6 +485,9 @@ def do_slide3(prs, q_row, risk_profile):
     except (TypeError, ValueError):
         # Could be "10%" string
         step_up = float(str(stepup_raw).rstrip('%')) if str(stepup_raw).rstrip('%').replace('.','').isdigit() else 0.0
+    # Data stored as fraction (0.2 = 20%) — normalize to percent for display
+    if 0 < step_up < 1:
+        step_up *= 100
     has_stepup = step_up > 0
 
     shapes_to_remove = []
@@ -1615,6 +1619,20 @@ def _get_answer(question_text, q_row, context=''):
     if 'monthly sip' in q and 'amount' in q:
         return _safe_inr(q_row.get('Monthly SIP Amount (with Infinite)', 0))
 
+    # Post-Retirement Income Planning slide (context='postret')
+    if context == 'postret':
+        if 'discretionary' in q:
+            return _safe_inr(q_row.get('PostRet: Discretionary Expenses', 0))
+        if 'monthly income' in q and 'expense' in q:
+            inc = q_row.get('PostRet: Passive+Pension Income', 0)
+            exp = q_row.get('PostRet: Living Expenses', 0)
+            return f'Income: {_safe_inr(inc)} ; Expenses: {_safe_inr(exp)}'
+        if 'financial investments apart' in q or 'apart from mutual' in q:
+            v = q_row.get('PostRet: Other Instruments')
+            if v is not None and not (isinstance(v, float) and pd.isna(v)):
+                return _safe_str(v)
+            return _safe_str(q_row.get('Other Investments Value'))
+
     # Retirement slides 5-6
     if 'monthly income' in q and 'expense' in q:
         inc = q_row.get('Ret: Monthly Income', 0)
@@ -1627,7 +1645,7 @@ def _get_answer(question_text, q_row, context=''):
     if 'year-on-year' in q or 'yoy' in q:
         return _safe_pct(q_row.get('Ret: YoY Investment Increase %'))
     if 'financial investments apart' in q or 'apart from mutual' in q:
-        return _safe_str(q_row.get('Other Investments Value'))
+        return _safe_inr(q_row.get('Other Investments Value'))
     if 'liabilities' in q and ('emi' in q or 'loan' in q):
         v = q_row.get('Ret: Liabilities Detail')
         return _safe_str(v) if not (isinstance(v, float) and pd.isna(v)) else 'None'
@@ -1708,8 +1726,17 @@ def _get_answer(question_text, q_row, context=''):
         times = []
         for i in range(1, 5):
             t = q_row.get(f'Marriage: Child {i} Timeframe')
-            if t is not None and not (isinstance(t, float) and pd.isna(t)) and str(t).strip():
-                times.append(_safe_str(t))
+            if t is None or (isinstance(t, float) and pd.isna(t)):
+                continue
+            s = _safe_str(t).strip()
+            if not s:
+                continue
+            # Normalize: bare number → "N years";  "6-8years" → "6-8 years"
+            if re.fullmatch(r'\d+', s):
+                s = f'{s} years'
+            else:
+                s = re.sub(r'(\d)\s*years?', r'\1 years', s)
+            times.append(s)
         return ' & '.join(times) if times else '-'
     if 'budget for marriage' in q or ('budget' in q and 'marriage' in q):
         budgets = []
@@ -1940,11 +1967,17 @@ def populate_questionnaire_slide(slide, q_row):
         if not shape.has_text_frame:
             continue
         t = shape.text_frame.text
+        tl = t.lower()
         if 'Vehicle Purchase' in t or ('Vehicle' in t and 'Purchase' in t):
             slide_context = 'vehicle'
             break
         if 'Home Purchase' in t or ('Home' in t and 'Purchase' in t):
             slide_context = 'home'
+            break
+        # Post-Retirement Income Planning slide has the unique
+        # "Annual discretionary expenses" question
+        if 'discretionary' in tl:
+            slide_context = 'postret'
             break
 
     for shape in slide.shapes:
@@ -2240,7 +2273,11 @@ def do_questionnaire(prs, goals, q_row):
     norm = set()
     for g in goals:
         gl = g.lower()
-        if 'retirement' in gl:  norm.add('Retirement Planning')
+        # Distinguish "Post-Retirement Income Planning" from plain "Retirement Planning"
+        if 'post' in gl and 'retirement' in gl:
+            norm.add('Post-Retirement Income Planning')
+        elif 'retirement' in gl:
+            norm.add('Retirement Planning')
         if 'home'       in gl:  norm.add('Home Purchase')
         if 'education'  in gl:  norm.add("Children's Education")
         if 'marriage'   in gl:  norm.add("Children's Marriage")
@@ -2265,6 +2302,8 @@ def do_questionnaire(prs, goals, q_row):
         print("  Questionnaire: no q_row — skipping population")
 
     # ── Step 2: Remove slides for unselected goals ────────────────────────────
+    def _norm_ap(s): return s.replace('\u2019', "'").replace('\u2018', "'")
+
     to_del = []
     for idx in q_indices:
         slide = prs.slides[idx]
@@ -2273,8 +2312,9 @@ def do_questionnaire(prs, goals, q_row):
             if shape.has_text_frame and 'Infinite Questionnaire' in shape.text_frame.text:
                 title = shape.text_frame.text.strip(); break
 
+        title_norm = _norm_ap(title)
         for kw, goal_name in GOAL_KW_SLIDES.items():
-            if kw in title and goal_name not in norm:
+            if _norm_ap(kw) in title_norm and goal_name not in norm:
                 to_del.append(idx)
                 print(f"    Remove: '{title}'")
                 break
@@ -2302,18 +2342,54 @@ def do_questionnaire(prs, goals, q_row):
                 to_del.append(idx)
                 print(f"    Remove: PG slide (PG cost is 0 or missing)")
 
-    # Remove Retirement/Goals slides if not selected
-    if 'Retirement Planning' not in norm:
-        for idx in q_indices:
-            slide = prs.slides[idx]
-            for shape in slide.shapes:
-                if shape.has_text_frame:
-                    t = shape.text_frame.text
-                    if '| Goals' in t and 'Infinite Questionnaire' in t:
-                        if idx not in to_del:
-                            to_del.append(idx)
-                            print(f"    Remove: Retirement Goals slide")
-                        break
+    # Remove Retirement / Post-Retirement Goals slides based on goal selection.
+    # There are three "| Goals" slides in the base deck:
+    #   - Retirement Planning (5/6):        has "Expected change in expenses post-retirement"
+    #   - Retirement Planning (6/6):        has "Expected year-on-year increase in investment"
+    #         (a generic follow-up only relevant to ongoing Retirement Planning)
+    #   - Post-Retirement Income Planning:  has "Annual discretionary expenses"
+    # Rules:
+    #   has Retirement Planning only       → keep 5/6 + 6/6,   delete post-ret
+    #   has Post-Retirement Planning only  → keep post-ret,    delete 5/6 + 6/6
+    #   has both                           → keep all three
+    #   has neither                        → delete all three
+    has_ret      = 'Retirement Planning' in norm
+    has_post_ret = 'Post-Retirement Income Planning' in norm
+    for idx in q_indices:
+        slide = prs.slides[idx]
+        title = ''
+        is_retirement_variant  = False   # 5/6 "change in expenses post-retirement"
+        is_postret_variant     = False   # new 5/6 "annual discretionary expenses"
+        is_generic_goals       = False   # 6/6 "year-on-year increase"
+        for shape in _iter_shapes_recursive(slide.shapes):
+            if not shape.has_text_frame: continue
+            t  = shape.text_frame.text
+            tl = t.lower()
+            if 'Infinite Questionnaire' in t and '| Goals' in t:
+                title = t.strip()
+            if 'change in expenses' in tl and 'post-retirement' in tl:
+                is_retirement_variant = True
+            if 'discretionary' in tl:
+                is_postret_variant = True
+            if 'year-on-year' in tl:
+                is_generic_goals = True
+        if not title:
+            continue
+        # Decide whether to keep this slide
+        if is_postret_variant and not has_post_ret:
+            if idx not in to_del:
+                to_del.append(idx)
+                print(f"    Remove: Post-Retirement Goals slide (goal not selected)")
+        elif is_retirement_variant and not has_ret:
+            if idx not in to_del:
+                to_del.append(idx)
+                print(f"    Remove: Retirement Goals slide (goal not selected)")
+        elif is_generic_goals and not has_ret:
+            # Generic 6/6 goals slide belongs to Retirement Planning — delete it if
+            # regular Retirement Planning is not selected (even if post-retirement is).
+            if idx not in to_del:
+                to_del.append(idx)
+                print(f"    Remove: Generic Goals (6/6) slide (Retirement Planning not selected)")
 
     for idx in sorted(set(to_del), reverse=True):
         delete_slide(prs, idx)
